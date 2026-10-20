@@ -22,6 +22,8 @@ import android.graphics.drawable.GradientDrawable;
 import android.media.tv.TvContract;
 import android.media.tv.TvInputInfo;
 import android.media.tv.TvInputManager;
+import android.net.ConnectivityManager;
+import android.net.NetworkInfo;
 import android.net.wifi.WifiManager;
 import android.os.Bundle;
 import android.os.Handler;
@@ -101,6 +103,11 @@ public class MainActivity extends Activity {
     private int packageSeq;
     private PopupWindow inputsPopup;
 
+    // User customization: font choice and apps hidden by long-press.
+    private static final String[] FONTS = {null, "serif", "sans-serif-condensed", "monospace", "casual"};
+    private int fontIdx;
+    private final Set<String> userHidden = new HashSet<>();
+
     private final BroadcastReceiver tick = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent i) { updateClock(); updateWifi(); }
     };
@@ -116,6 +123,8 @@ public class MainActivity extends Activity {
         dockApps = getResources().getStringArray(R.array.dock_apps);
         hidden.addAll(Arrays.asList(getResources().getStringArray(R.array.hidden_apps)));
         hidden.add(getPackageName());
+        fontIdx = getPreferences(MODE_PRIVATE).getInt("font", 0);
+        userHidden.addAll(getPreferences(MODE_PRIVATE).getStringSet("hidden", new HashSet<>()));
         liveTvPkg = getString(R.string.live_tv_package);
         inputPickerPkg = getString(R.string.input_picker_package);
         cols = getResources().getInteger(R.integer.columns);
@@ -140,6 +149,7 @@ public class MainActivity extends Activity {
         tf.addAction(Intent.ACTION_TIME_CHANGED);
         tf.addAction(Intent.ACTION_TIMEZONE_CHANGED);
         tf.addAction(WifiManager.NETWORK_STATE_CHANGED_ACTION);
+        tf.addAction(ConnectivityManager.CONNECTIVITY_ACTION);
         registerReceiver(tick, tf);
         updateClock();
         updateWifi();
@@ -307,7 +317,20 @@ public class MainActivity extends Activity {
         wifiPill.setOnClickListener(v -> launch(new Intent(Settings.ACTION_WIFI_SETTINGS)));
         TextView settings = pill("Settings", "⚙");
         settings.setOnClickListener(v -> launch(new Intent(Settings.ACTION_SETTINGS)));
-        for (TextView p : new TextView[]{inputs, wifiPill, settings}) {
+        TextView wall = pill("Wallpaper", "▣");
+        wall.setOnClickListener(v -> nextWallpaper());
+        TextView font = pill("Font", "Aa");
+        font.setOnClickListener(v -> {
+            getPreferences(MODE_PRIVATE).edit().putInt("font", (fontIdx + 1) % FONTS.length).apply();
+            recreate();
+        });
+        TextView reset = pill("Show apps", "↺");
+        reset.setOnClickListener(v -> {
+            userHidden.clear();
+            getPreferences(MODE_PRIVATE).edit().remove("hidden").apply();
+            buildApps();
+        });
+        for (TextView p : new TextView[]{inputs, wall, font, reset, wifiPill, settings}) {
             right.addView(p, llp(-2, dp(30), dp(10), 0, 0, 0));
             pills.add(p);
         }
@@ -347,7 +370,8 @@ public class MainActivity extends Activity {
         Map<String, App> byPkg = new HashMap<>();
         for (ResolveInfo ri : pm.queryIntentActivities(q, 0)) {
             ActivityInfo ai = ri.activityInfo;
-            if (hidden.contains(ai.packageName) || byPkg.containsKey(ai.packageName)) continue;
+            if (hidden.contains(ai.packageName) || userHidden.contains(ai.packageName)
+                    || byPkg.containsKey(ai.packageName)) continue;
             App a = new App();
             a.pkg = ai.packageName;
             a.label = String.valueOf(ri.loadLabel(pm));
@@ -462,6 +486,12 @@ public class MainActivity extends Activity {
                 .addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER)
                 .setComponent(app.component)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)));
+        card.setOnLongClickListener(v -> {
+            userHidden.add(app.pkg);
+            getPreferences(MODE_PRIVATE).edit().putStringSet("hidden", new HashSet<>(userHidden)).apply();
+            buildApps();
+            return true;
+        });
         card.setOnFocusChangeListener((v, has) -> {
             float s = has ? (inDock ? 1.12f : 1.1f) : 1f;
             v.animate().scaleX(s).scaleY(s).translationZ(has ? dp(14) : 0)
@@ -622,13 +652,21 @@ public class MainActivity extends Activity {
     }
 
     private void updateWifi() {
-        String name = "Wi-Fi";
+        String name = "Offline";
         try {
-            WifiManager wm = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
-            if (wm != null && wm.getConnectionInfo() != null) {
-                String s = wm.getConnectionInfo().getSSID();
-                if (s != null && !s.contains("unknown ssid")) name = s.replace("\"", "");
-                if (wm.getConnectionInfo().getNetworkId() == -1) name = "Offline";
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            NetworkInfo ni = cm == null ? null : cm.getActiveNetworkInfo();
+            if (ni != null && ni.isConnected()) {
+                name = ni.getType() == ConnectivityManager.TYPE_ETHERNET ? "Ethernet" : "Wi-Fi";
+                if (ni.getType() == ConnectivityManager.TYPE_WIFI) {
+                    WifiManager wm = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
+                    if (wm != null && wm.getConnectionInfo() != null) {
+                        String s = wm.getConnectionInfo().getSSID();
+                        if (s != null && !s.contains("unknown ssid") && !s.equals("<unknown ssid>")) {
+                            name = s.replace("\"", "");
+                        }
+                    }
+                }
             }
         } catch (SecurityException ignored) { }
         wifiPill.setText("◉  " + name);
@@ -794,6 +832,7 @@ public class MainActivity extends Activity {
     private TextView text(float sp, String family, int color) {
         TextView t = new TextView(this);
         t.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
+        if (FONTS[fontIdx] != null) family = FONTS[fontIdx];
         t.setTypeface(Typeface.create(family, Typeface.NORMAL));
         t.setTextColor(color);
         return t;
