@@ -515,6 +515,34 @@ public class MainActivity extends Activity {
         return box;
     }
 
+    /** Long-press menu on an app tile: hide it, move it in/out of the dock, or move it to the start of the grid. */
+    private void showAppMenu(App app, boolean inDock) {
+        String[] opts = inDock
+                ? new String[]{"Hide app", "Remove from dock"}
+                : new String[]{"Hide app", "Add to dock", "Move to start"};
+        new AlertDialog.Builder(this, DIALOG_THEME).setTitle(app.label)
+                .setItems(opts, (d, which) -> {
+                    if (which == 0) {
+                        userHidden.add(app.pkg);
+                        getPreferences(MODE_PRIVATE).edit()
+                                .putStringSet("hidden", new HashSet<>(userHidden)).apply();
+                    } else if (which == 1) {
+                        List<String> dockList = new ArrayList<>(Arrays.asList(dockApps));
+                        if (inDock) dockList.remove(app.pkg);
+                        else if (!dockList.contains(app.pkg)) dockList.add(app.pkg);
+                        dockApps = dockList.toArray(new String[0]);
+                        getPreferences(MODE_PRIVATE).edit()
+                                .putString("dock", android.text.TextUtils.join(",", dockList)).apply();
+                    } else {
+                        gridOrder.remove(app.pkg);
+                        gridOrder.add(0, app.pkg);
+                        getPreferences(MODE_PRIVATE).edit()
+                                .putString("order", android.text.TextUtils.join(",", gridOrder)).apply();
+                    }
+                    buildApps();
+                }).show();
+    }
+
     /** Explicit D-pad targets: one row per press, ends of rows and of the top bar don't wrap. */
     private void wireFocus() {
         int d = dockCards.size(), g = gridCards.size();
