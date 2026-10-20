@@ -3,6 +3,7 @@ package com.mihir.tvhome;
 import android.animation.ArgbEvaluator;
 import android.animation.ValueAnimator;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
@@ -125,6 +126,8 @@ public class MainActivity extends Activity {
         hidden.add(getPackageName());
         fontIdx = getPreferences(MODE_PRIVATE).getInt("font", 0);
         userHidden.addAll(getPreferences(MODE_PRIVATE).getStringSet("hidden", new HashSet<>()));
+        String savedDock = getPreferences(MODE_PRIVATE).getString("dock", null);
+        if (savedDock != null && !savedDock.isEmpty()) dockApps = savedDock.split(",");
         liveTvPkg = getString(R.string.live_tv_package);
         inputPickerPkg = getString(R.string.input_picker_package);
         cols = getResources().getInteger(R.integer.columns);
@@ -317,20 +320,7 @@ public class MainActivity extends Activity {
         wifiPill.setOnClickListener(v -> launch(new Intent(Settings.ACTION_WIFI_SETTINGS)));
         TextView settings = pill("Settings", "⚙");
         settings.setOnClickListener(v -> launch(new Intent(Settings.ACTION_SETTINGS)));
-        TextView wall = pill("Wallpaper", "▣");
-        wall.setOnClickListener(v -> nextWallpaper());
-        TextView font = pill("Font", "Aa");
-        font.setOnClickListener(v -> {
-            getPreferences(MODE_PRIVATE).edit().putInt("font", (fontIdx + 1) % FONTS.length).apply();
-            recreate();
-        });
-        TextView reset = pill("Show apps", "↺");
-        reset.setOnClickListener(v -> {
-            userHidden.clear();
-            getPreferences(MODE_PRIVATE).edit().remove("hidden").apply();
-            buildApps();
-        });
-        for (TextView p : new TextView[]{inputs, wall, font, reset, wifiPill, settings}) {
+        for (TextView p : new TextView[]{inputs, wifiPill, settings}) {
             right.addView(p, llp(-2, dp(30), dp(10), 0, 0, 0));
             pills.add(p);
         }
@@ -487,9 +477,7 @@ public class MainActivity extends Activity {
                 .setComponent(app.component)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)));
         card.setOnLongClickListener(v -> {
-            userHidden.add(app.pkg);
-            getPreferences(MODE_PRIVATE).edit().putStringSet("hidden", new HashSet<>(userHidden)).apply();
-            buildApps();
+            showAppManager();
             return true;
         });
         card.setOnFocusChangeListener((v, has) -> {
@@ -637,6 +625,102 @@ public class MainActivity extends Activity {
             r.setTextColor(has ? 0xFF111111 : Color.WHITE);
         });
         return r;
+    }
+
+    // ---------------------------------------------------------------- app manager
+
+    private static final int DIALOG_THEME = android.R.style.Theme_DeviceDefault_Dialog_Alert;
+
+    /** Every launchable app (including ones the user hid), sorted by name. */
+    private List<App> allApps() {
+        PackageManager pm = getPackageManager();
+        Intent q = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER);
+        Map<String, App> m = new HashMap<>();
+        for (ResolveInfo ri : pm.queryIntentActivities(q, 0)) {
+            String p = ri.activityInfo.packageName;
+            if (hidden.contains(p) || m.containsKey(p)) continue;
+            App a = new App();
+            a.pkg = p;
+            a.label = String.valueOf(ri.loadLabel(pm));
+            m.put(p, a);
+        }
+        List<App> list = new ArrayList<>(m.values());
+        Collections.sort(list, (x, y) -> x.label.compareToIgnoreCase(y.label));
+        return list;
+    }
+
+    private void showAppManager() {
+        String[] opts = {"Choose dock apps (top row)", "Choose which apps to show",
+                "Next wallpaper", "Change font", "Reset apps"};
+        new AlertDialog.Builder(this, DIALOG_THEME).setTitle("Customize")
+                .setItems(opts, (d, which) -> {
+                    if (which == 0) pickDock();
+                    else if (which == 1) pickVisible();
+                    else if (which == 2) nextWallpaper();
+                    else if (which == 3) {
+                        getPreferences(MODE_PRIVATE).edit().putInt("font", (fontIdx + 1) % FONTS.length).apply();
+                        recreate();
+                    } else resetApps();
+                }).show();
+    }
+
+    private void pickDock() {
+        List<App> apps = allApps();
+        String[] labels = new String[apps.size()];
+        boolean[] on = new boolean[apps.size()];
+        List<String> current = Arrays.asList(dockApps);
+        for (int i = 0; i < apps.size(); i++) {
+            labels[i] = apps.get(i).label;
+            on[i] = current.contains(apps.get(i).pkg);
+        }
+        new AlertDialog.Builder(this, DIALOG_THEME).setTitle("Dock apps")
+                .setMultiChoiceItems(labels, on, (d, which, isOn) -> on[which] = isOn)
+                .setPositiveButton("Save", (d, which) -> {
+                    List<String> out = new ArrayList<>();
+                    // Keep the existing order for apps that stay, then append newly picked ones.
+                    for (String p : dockApps) {
+                        for (int i = 0; i < apps.size(); i++) {
+                            if (apps.get(i).pkg.equals(p) && on[i]) out.add(p);
+                        }
+                    }
+                    for (int i = 0; i < apps.size(); i++) {
+                        if (on[i] && !out.contains(apps.get(i).pkg)) out.add(apps.get(i).pkg);
+                    }
+                    dockApps = out.toArray(new String[0]);
+                    getPreferences(MODE_PRIVATE).edit()
+                            .putString("dock", android.text.TextUtils.join(",", out)).apply();
+                    buildApps();
+                })
+                .setNegativeButton("Cancel", null).show();
+    }
+
+    private void pickVisible() {
+        List<App> apps = allApps();
+        String[] labels = new String[apps.size()];
+        boolean[] on = new boolean[apps.size()];
+        for (int i = 0; i < apps.size(); i++) {
+            labels[i] = apps.get(i).label;
+            on[i] = !userHidden.contains(apps.get(i).pkg);
+        }
+        new AlertDialog.Builder(this, DIALOG_THEME).setTitle("Show these apps")
+                .setMultiChoiceItems(labels, on, (d, which, isOn) -> on[which] = isOn)
+                .setPositiveButton("Save", (d, which) -> {
+                    for (int i = 0; i < apps.size(); i++) {
+                        if (on[i]) userHidden.remove(apps.get(i).pkg);
+                        else userHidden.add(apps.get(i).pkg);
+                    }
+                    getPreferences(MODE_PRIVATE).edit()
+                            .putStringSet("hidden", new HashSet<>(userHidden)).apply();
+                    buildApps();
+                })
+                .setNegativeButton("Cancel", null).show();
+    }
+
+    private void resetApps() {
+        userHidden.clear();
+        dockApps = getResources().getStringArray(R.array.dock_apps);
+        getPreferences(MODE_PRIVATE).edit().remove("hidden").remove("dock").apply();
+        buildApps();
     }
 
     // ---------------------------------------------------------------- status
@@ -864,9 +948,9 @@ public class MainActivity extends Activity {
 
     @Override
     public boolean dispatchKeyEvent(KeyEvent e) {
-        // Menu key on the remote opens the Inputs dropdown.
-        if (e.getKeyCode() == KeyEvent.KEYCODE_MENU && e.getAction() == KeyEvent.ACTION_UP && !pills.isEmpty()) {
-            showInputs(pills.get(0));
+        // Menu key on the remote opens the Customize menu (dock, visible apps, wallpaper, font).
+        if (e.getKeyCode() == KeyEvent.KEYCODE_MENU && e.getAction() == KeyEvent.ACTION_UP) {
+            showAppManager();
             return true;
         }
         return super.dispatchKeyEvent(e);
