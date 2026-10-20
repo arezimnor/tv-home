@@ -18,13 +18,13 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Outline;
 import android.graphics.Typeface;
+import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.media.tv.TvContract;
 import android.media.tv.TvInputInfo;
 import android.media.tv.TvInputManager;
 import android.net.ConnectivityManager;
-import android.net.NetworkInfo;
 import android.net.wifi.WifiManager;
 import android.os.Bundle;
 import android.os.Handler;
@@ -103,11 +103,15 @@ public class MainActivity extends Activity {
     private boolean firstShow = true;
     private int packageSeq;
     private PopupWindow inputsPopup;
+    private ConnectivityManager.NetworkCallback netCb;
 
-    // User customization: font choice and apps hidden by long-press.
+    // User customization: font choice, hidden apps, grid order, custom icons.
     private static final String[] FONTS = {null, "serif", "sans-serif-condensed", "monospace", "casual"};
+    private static final String[] FONT_NAMES = {"Default", "Serif", "Condensed", "Monospace", "Casual"};
     private int fontIdx;
     private final Set<String> userHidden = new HashSet<>();
+    private List<String> gridOrder = new ArrayList<>();
+    private String focusPkg;
 
     private final BroadcastReceiver tick = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent i) { updateClock(); updateWifi(); }
@@ -125,9 +129,12 @@ public class MainActivity extends Activity {
         hidden.addAll(Arrays.asList(getResources().getStringArray(R.array.hidden_apps)));
         hidden.add(getPackageName());
         fontIdx = getPreferences(MODE_PRIVATE).getInt("font", 0);
+        if (fontIdx < 0 || fontIdx >= FONTS.length) fontIdx = 0;
         userHidden.addAll(getPreferences(MODE_PRIVATE).getStringSet("hidden", new HashSet<>()));
         String savedDock = getPreferences(MODE_PRIVATE).getString("dock", null);
         if (savedDock != null && !savedDock.isEmpty()) dockApps = savedDock.split(",");
+        String savedOrder = getPreferences(MODE_PRIVATE).getString("order", null);
+        if (savedOrder != null && !savedOrder.isEmpty()) gridOrder.addAll(Arrays.asList(savedOrder.split(",")));
         liveTvPkg = getString(R.string.live_tv_package);
         inputPickerPkg = getString(R.string.input_picker_package);
         cols = getResources().getInteger(R.integer.columns);
@@ -154,6 +161,18 @@ public class MainActivity extends Activity {
         tf.addAction(WifiManager.NETWORK_STATE_CHANGED_ACTION);
         tf.addAction(ConnectivityManager.CONNECTIVITY_ACTION);
         registerReceiver(tick, tf);
+
+        // Live online/offline indicator (API 24+).
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+        netCb = new ConnectivityManager.NetworkCallback() {
+            @Override public void onAvailable(android.net.Network n) { runOnUiThread(MainActivity.this::updateWifi); }
+            @Override public void onLost(android.net.Network n) { runOnUiThread(MainActivity.this::updateWifi); }
+            @Override public void onCapabilitiesChanged(android.net.Network n, android.net.NetworkCapabilities c) {
+                runOnUiThread(MainActivity.this::updateWifi);
+            }
+        };
+        try { if (cm != null) cm.registerDefaultNetworkCallback(netCb); } catch (RuntimeException ignored) { }
+
         updateClock();
         updateWifi();
         View last = lastFocusedId == View.NO_ID ? null : findViewById(lastFocusedId);
@@ -172,6 +191,11 @@ public class MainActivity extends Activity {
         super.onPause();
         handler.removeCallbacks(rotateWallpaper);
         unregisterReceiver(tick);
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (cm != null && netCb != null) cm.unregisterNetworkCallback(netCb);
+        } catch (RuntimeException ignored) { }
+        netCb = null;
         if (inputsPopup != null) inputsPopup.dismiss();
     }
 
@@ -370,6 +394,8 @@ public class MainActivity extends Activity {
             if (banner == null) banner = ai.applicationInfo.loadBanner(pm);
             a.isBanner = banner != null;
             a.art = banner != null ? banner : ri.loadIcon(pm);
+            Bitmap custom = loadCustomIcon(a.pkg);
+            if (custom != null) { a.art = new BitmapDrawable(getResources(), custom); a.isBanner = true; }
             a.color = sampleColor(a.pkg, a.art);
             byPkg.put(a.pkg, a);
         }
@@ -377,7 +403,13 @@ public class MainActivity extends Activity {
         List<App> dock = new ArrayList<>();
         for (String p : dockApps) if (byPkg.containsKey(p)) dock.add(byPkg.remove(p));
         List<App> rest = new ArrayList<>(byPkg.values());
-        Collections.sort(rest, (x, y) -> x.label.compareToIgnoreCase(y.label));
+        Collections.sort(rest, (x, y) -> {
+            int ix = gridOrder.indexOf(x.pkg), iy = gridOrder.indexOf(y.pkg);
+            if (ix >= 0 && iy >= 0) return ix - iy;
+            if (ix >= 0) return -1;
+            if (iy >= 0) return 1;
+            return x.label.compareToIgnoreCase(y.label);
+        });
 
         dockRow.removeAllViews();
         grid.removeAllViews();
@@ -414,9 +446,11 @@ public class MainActivity extends Activity {
         wireFocus();
 
         if (!dock.isEmpty()) { title.setText(dock.get(0).label); setGlow(dock.get(0).color); }
-        View last = lastFocusedId == View.NO_ID ? null : findViewById(lastFocusedId);
-        if (last != null) last.requestFocus();
-        else if (!dockCards.isEmpty()) dockCards.get(0).requestFocus();
+        View last = focusPkg != null ? cardFor(focusPkg)
+                : (lastFocusedId == View.NO_ID ? null : findViewById(lastFocusedId));
+        focusPkg = null;
+        if (last == null && !dockCards.isEmpty()) last = dockCards.get(0);
+        if (last != null) { final View f = last; handler.post(f::requestFocus); }
     }
 
     /** A 16:9 card with the app's banner; the name shows under it while focused. */
@@ -476,10 +510,7 @@ public class MainActivity extends Activity {
                 .addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER)
                 .setComponent(app.component)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)));
-        card.setOnLongClickListener(v -> {
-            showAppManager();
-            return true;
-        });
+        card.setOnLongClickListener(v -> { showAppMenu(app); return true; });
         card.setOnFocusChangeListener((v, has) -> {
             float s = has ? (inDock ? 1.12f : 1.1f) : 1f;
             v.animate().scaleX(s).scaleY(s).translationZ(has ? dp(14) : 0)
@@ -657,10 +688,8 @@ public class MainActivity extends Activity {
                     if (which == 0) pickDock();
                     else if (which == 1) pickVisible();
                     else if (which == 2) nextWallpaper();
-                    else if (which == 3) {
-                        getPreferences(MODE_PRIVATE).edit().putInt("font", (fontIdx + 1) % FONTS.length).apply();
-                        recreate();
-                    } else resetApps();
+                    else if (which == 3) pickFont();
+                    else resetApps();
                 }).show();
     }
 
@@ -718,9 +747,126 @@ public class MainActivity extends Activity {
 
     private void resetApps() {
         userHidden.clear();
+        gridOrder.clear();
         dockApps = getResources().getStringArray(R.array.dock_apps);
-        getPreferences(MODE_PRIVATE).edit().remove("hidden").remove("dock").apply();
+        android.content.SharedPreferences.Editor ed = getPreferences(MODE_PRIVATE).edit()
+                .remove("hidden").remove("dock").remove("order");
+        for (String k : getPreferences(MODE_PRIVATE).getAll().keySet()) {
+            if (k.startsWith("icon_")) ed.remove(k);
+        }
+        ed.apply();
+        colorCache.clear();
         buildApps();
+    }
+
+    private void pickFont() {
+        new AlertDialog.Builder(this, DIALOG_THEME).setTitle("Font")
+                .setSingleChoiceItems(FONT_NAMES, fontIdx, (d, which) -> {
+                    getPreferences(MODE_PRIVATE).edit().putInt("font", which).apply();
+                    d.dismiss();
+                    recreate();
+                }).show();
+    }
+
+    // ---------------------------------------------------------------- per-app menu (reorder, icon)
+
+    private View cardFor(String pkg) {
+        for (View c : dockCards) if (((App) c.getTag()).pkg.equals(pkg)) return c;
+        for (View c : gridCards) if (((App) c.getTag()).pkg.equals(pkg)) return c;
+        return null;
+    }
+
+    private List<String> pkgsOf(List<View> cards) {
+        List<String> l = new ArrayList<>();
+        for (View c : cards) l.add(((App) c.getTag()).pkg);
+        return l;
+    }
+
+    private void showAppMenu(App app) {
+        boolean dock = dockCards.contains(cardFor(app.pkg));
+        String[] opts = dock
+                ? new String[]{"Move left", "Move right", "Change icon", "Reset icon", "More options…"}
+                : new String[]{"Move left", "Move right", "Move up a row", "Move down a row",
+                               "Change icon", "Reset icon", "More options…"};
+        new AlertDialog.Builder(this, DIALOG_THEME).setTitle(app.label)
+                .setItems(opts, (d, which) -> {
+                    String o = opts[which];
+                    if (o.equals("Move left")) moveApp(app, -1);
+                    else if (o.equals("Move right")) moveApp(app, 1);
+                    else if (o.equals("Move up a row")) moveApp(app, -cols);
+                    else if (o.equals("Move down a row")) moveApp(app, cols);
+                    else if (o.equals("Change icon")) pickIcon(app);
+                    else if (o.equals("Reset icon")) {
+                        getPreferences(MODE_PRIVATE).edit().remove("icon_" + app.pkg).apply();
+                        colorCache.remove(app.pkg);
+                        focusPkg = app.pkg;
+                        buildApps();
+                    } else showAppManager();
+                }).show();
+    }
+
+    private void moveApp(App app, int delta) {
+        boolean dock = dockCards.contains(cardFor(app.pkg));
+        List<String> list = pkgsOf(dock ? dockCards : gridCards);
+        int i = list.indexOf(app.pkg);
+        int j = Math.max(0, Math.min(list.size() - 1, i + delta));
+        if (i < 0 || i == j) return;
+        list.add(j, list.remove(i));
+        if (dock) {
+            dockApps = list.toArray(new String[0]);
+            getPreferences(MODE_PRIVATE).edit().putString("dock", android.text.TextUtils.join(",", list)).apply();
+        } else {
+            gridOrder = list;
+            getPreferences(MODE_PRIVATE).edit().putString("order", android.text.TextUtils.join(",", list)).apply();
+        }
+        focusPkg = app.pkg;
+        buildApps();
+    }
+
+    // ---- custom icons: images placed in the icons/ folder, chosen per app ----
+
+    private java.io.File iconDir() {
+        java.io.File d = new java.io.File(getExternalFilesDir(null), "icons");
+        if (!d.exists()) d.mkdirs();
+        return d;
+    }
+
+    private Bitmap loadCustomIcon(String pkg) {
+        String name = getPreferences(MODE_PRIVATE).getString("icon_" + pkg, null);
+        if (name == null) return null;
+        java.io.File f = new java.io.File(iconDir(), name);
+        if (!f.exists()) return null;
+        BitmapFactory.Options o = new BitmapFactory.Options();
+        o.inJustDecodeBounds = true;
+        BitmapFactory.decodeFile(f.getPath(), o);
+        int sample = 1;
+        while (o.outWidth / (sample * 2) >= 640) sample *= 2;
+        o.inJustDecodeBounds = false;
+        o.inSampleSize = sample;
+        return BitmapFactory.decodeFile(f.getPath(), o);
+    }
+
+    private void pickIcon(App app) {
+        java.io.File[] files = iconDir().listFiles((dir, n) -> {
+            String l = n.toLowerCase(Locale.ROOT);
+            return l.endsWith(".png") || l.endsWith(".jpg") || l.endsWith(".jpeg") || l.endsWith(".webp");
+        });
+        if (files == null || files.length == 0) {
+            new AlertDialog.Builder(this, DIALOG_THEME).setTitle("No images found")
+                    .setMessage("Put PNG/JPG images (16:9 works best) in:\n" + iconDir().getPath())
+                    .setPositiveButton("OK", null).show();
+            return;
+        }
+        Arrays.sort(files);
+        String[] names = new String[files.length];
+        for (int i = 0; i < files.length; i++) names[i] = files[i].getName();
+        new AlertDialog.Builder(this, DIALOG_THEME).setTitle("Icon for " + app.label)
+                .setItems(names, (d, which) -> {
+                    getPreferences(MODE_PRIVATE).edit().putString("icon_" + app.pkg, names[which]).apply();
+                    colorCache.remove(app.pkg);
+                    focusPkg = app.pkg;
+                    buildApps();
+                }).show();
     }
 
     // ---------------------------------------------------------------- status
@@ -735,27 +881,34 @@ public class MainActivity extends Activity {
         date.setText(new SimpleDateFormat("EEEE  d MMMM", Locale.getDefault()).format(now.getTime()).toUpperCase(Locale.getDefault()));
     }
 
+    /** Green dot = connected and internet validated, red dot = offline or no internet. */
     private void updateWifi() {
         String name = "Offline";
+        boolean online = false;
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
-            NetworkInfo ni = cm == null ? null : cm.getActiveNetworkInfo();
-            if (ni != null && ni.isConnected()) {
-                name = ni.getType() == ConnectivityManager.TYPE_ETHERNET ? "Ethernet" : "Wi-Fi";
-                if (ni.getType() == ConnectivityManager.TYPE_WIFI) {
+            android.net.Network n = cm == null ? null : cm.getActiveNetwork();
+            android.net.NetworkCapabilities nc = n == null ? null : cm.getNetworkCapabilities(n);
+            if (nc != null && nc.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                online = nc.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+                if (nc.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET)) {
+                    name = "Ethernet";
+                } else {
+                    name = "Wi-Fi";
                     WifiManager wm = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
                     if (wm != null && wm.getConnectionInfo() != null) {
                         String s = wm.getConnectionInfo().getSSID();
-                        if (s != null && !s.contains("unknown ssid") && !s.equals("<unknown ssid>")) {
-                            name = s.replace("\"", "");
-                        }
+                        if (s != null && !s.contains("unknown ssid")) name = s.replace("\"", "");
                     }
                 }
+                if (!online) name += " (no internet)";
             }
         } catch (SecurityException ignored) { }
-        boolean online = !name.equals("Offline");
+
         android.text.SpannableString s = new android.text.SpannableString("●  " + name);
         s.setSpan(new android.text.style.ForegroundColorSpan(online ? 0xFF34C759 : 0xFFFF3B30),
+                0, 1, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        s.setSpan(new android.text.style.RelativeSizeSpan(1.3f),
                 0, 1, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         wifiPill.setText(s);
     }
