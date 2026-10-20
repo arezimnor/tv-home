@@ -108,6 +108,7 @@ public class MainActivity extends Activity {
     private static final String[] FONTS = {null, "serif", "sans-serif-condensed", "monospace", "casual"};
     private int fontIdx;
     private final Set<String> userHidden = new HashSet<>();
+    private List<String> gridOrder = new ArrayList<>(); // user's custom order for the All Apps grid
 
     private final BroadcastReceiver tick = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent i) { updateClock(); updateWifi(); }
@@ -128,6 +129,8 @@ public class MainActivity extends Activity {
         userHidden.addAll(getPreferences(MODE_PRIVATE).getStringSet("hidden", new HashSet<>()));
         String savedDock = getPreferences(MODE_PRIVATE).getString("dock", null);
         if (savedDock != null && !savedDock.isEmpty()) dockApps = savedDock.split(",");
+        String savedOrder = getPreferences(MODE_PRIVATE).getString("order", null);
+        if (savedOrder != null && !savedOrder.isEmpty()) gridOrder.addAll(Arrays.asList(savedOrder.split(",")));
         liveTvPkg = getString(R.string.live_tv_package);
         inputPickerPkg = getString(R.string.input_picker_package);
         cols = getResources().getInteger(R.integer.columns);
@@ -377,7 +380,13 @@ public class MainActivity extends Activity {
         List<App> dock = new ArrayList<>();
         for (String p : dockApps) if (byPkg.containsKey(p)) dock.add(byPkg.remove(p));
         List<App> rest = new ArrayList<>(byPkg.values());
-        Collections.sort(rest, (x, y) -> x.label.compareToIgnoreCase(y.label));
+        Collections.sort(rest, (x, y) -> {
+            int a = gridOrder.indexOf(x.pkg), b = gridOrder.indexOf(y.pkg);
+            if (a >= 0 && b >= 0) return a - b;
+            if (a >= 0) return -1;
+            if (b >= 0) return 1;
+            return x.label.compareToIgnoreCase(y.label);
+        });
 
         dockRow.removeAllViews();
         grid.removeAllViews();
@@ -477,12 +486,12 @@ public class MainActivity extends Activity {
                 .setComponent(app.component)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)));
         card.setOnLongClickListener(v -> {
-            showAppManager();
+            showAppMenu(app, inDock);
             return true;
         });
         card.setOnFocusChangeListener((v, has) -> {
             float s = has ? (inDock ? 1.12f : 1.1f) : 1f;
-            v.animate().scaleX(s).scaleY(s).translationZ(has ? dp(14) : 0)
+            v.animate().scaleX(s).scaleY(s)
                     .setInterpolator(has ? new OvershootInterpolator(1.8f) : new DecelerateInterpolator())
                     .setDuration(has ? 320 : 200).start();
             shine.animate().alpha(has ? 1f : 0f).setDuration(160).start();
@@ -719,7 +728,8 @@ public class MainActivity extends Activity {
     private void resetApps() {
         userHidden.clear();
         dockApps = getResources().getStringArray(R.array.dock_apps);
-        getPreferences(MODE_PRIVATE).edit().remove("hidden").remove("dock").apply();
+        gridOrder.clear();
+        getPreferences(MODE_PRIVATE).edit().remove("hidden").remove("dock").remove("order").apply();
         buildApps();
     }
 
@@ -844,7 +854,9 @@ public class MainActivity extends Activity {
         root.addView(wallFront, 1, new FrameLayout.LayoutParams(-1, -1));
         wallFront.setImageBitmap(bm);
         wallFront.setAlpha(0f);
+        wallFront.setLayerType(View.LAYER_TYPE_HARDWARE, null); // GPU-cached fade
         wallFront.animate().alpha(1f).setDuration(firstWallpaper ? 600 : 2000).withEndAction(() -> {
+            wallFront.setLayerType(View.LAYER_TYPE_NONE, null);
             wallBack.setImageDrawable(null); // release the previous photo
         }).start();
         firstWallpaper = false;
