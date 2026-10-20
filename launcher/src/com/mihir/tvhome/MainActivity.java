@@ -753,20 +753,29 @@ public class MainActivity extends Activity {
                 }
             }
         } catch (SecurityException ignored) { }
-        wifiPill.setText("◉  " + name);
+        boolean online = !name.equals("Offline");
+        android.text.SpannableString s = new android.text.SpannableString("●  " + name);
+        s.setSpan(new android.text.style.ForegroundColorSpan(online ? 0xFF34C759 : 0xFFFF3B30),
+                0, 1, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        wifiPill.setText(s);
     }
 
     // ---------------------------------------------------------------- glow
 
     private void setGlow(int color) {
         glowColor = color;
-        GradientDrawable g = new GradientDrawable();
-        g.setGradientType(GradientDrawable.RADIAL_GRADIENT);
-        g.setGradientCenter(0.5f, 0.78f);
-        g.setGradientRadius(getResources().getDisplayMetrics().widthPixels * 0.62f);
-        g.setColors(new int[]{withAlpha(color, 0.5f), withAlpha(color, 0.14f), Color.TRANSPARENT});
-        glow.setBackground(g);
+        // Reuse one drawable: building a new one every animation frame causes dropped frames.
+        if (glowDrawable == null) {
+            glowDrawable = new GradientDrawable();
+            glowDrawable.setGradientType(GradientDrawable.RADIAL_GRADIENT);
+            glowDrawable.setGradientCenter(0.5f, 0.78f);
+            glowDrawable.setGradientRadius(getResources().getDisplayMetrics().widthPixels * 0.62f);
+            glow.setBackground(glowDrawable);
+        }
+        glowDrawable.setColors(new int[]{withAlpha(color, 0.5f), withAlpha(color, 0.14f), Color.TRANSPARENT});
     }
+
+    private GradientDrawable glowDrawable;
 
     private void animateGlow(int to) {
         if (glowAnim != null) glowAnim.cancel();
@@ -801,10 +810,22 @@ public class MainActivity extends Activity {
         String name = "wallpapers/" + wallpapers[wallIndex];
         new Thread(() -> {
             Bitmap bm = null;
-            try (java.io.InputStream in = getAssets().open(name)) {
+            try {
+                // Decode at screen size, not full size: huge bitmaps make the crossfade stutter.
                 BitmapFactory.Options o = new BitmapFactory.Options();
+                o.inJustDecodeBounds = true;
+                try (java.io.InputStream in = getAssets().open(name)) {
+                    BitmapFactory.decodeStream(in, null, o);
+                }
+                int targetW = getResources().getDisplayMetrics().widthPixels;
+                int sample = 1;
+                while (o.outWidth / (sample * 2) >= targetW) sample *= 2;
+                o.inJustDecodeBounds = false;
+                o.inSampleSize = sample;
                 o.inPreferredConfig = Bitmap.Config.RGB_565;
-                bm = BitmapFactory.decodeStream(in, null, o);
+                try (java.io.InputStream in = getAssets().open(name)) {
+                    bm = BitmapFactory.decodeStream(in, null, o);
+                }
             } catch (java.io.IOException ignored) { }
             Bitmap result = bm;
             runOnUiThread(() -> showWallpaper(result));
