@@ -125,7 +125,6 @@ public class MainActivity extends Activity {
         dockApps = getResources().getStringArray(R.array.dock_apps);
         hidden.addAll(Arrays.asList(getResources().getStringArray(R.array.hidden_apps)));
         hidden.add(getPackageName());
-        fontIdx = getPreferences(MODE_PRIVATE).getInt("font", 0);
         userHidden.addAll(getPreferences(MODE_PRIVATE).getStringSet("hidden", new HashSet<>()));
         String savedDock = getPreferences(MODE_PRIVATE).getString("dock", null);
         if (savedDock != null && !savedDock.isEmpty()) dockApps = savedDock.split(",");
@@ -515,34 +514,6 @@ public class MainActivity extends Activity {
         return box;
     }
 
-    /** Long-press menu on an app tile: hide it, move it in/out of the dock, or move it to the start of the grid. */
-    private void showAppMenu(App app, boolean inDock) {
-        String[] opts = inDock
-                ? new String[]{"Hide app", "Remove from dock"}
-                : new String[]{"Hide app", "Add to dock", "Move to start"};
-        new AlertDialog.Builder(this, DIALOG_THEME).setTitle(app.label)
-                .setItems(opts, (d, which) -> {
-                    if (which == 0) {
-                        userHidden.add(app.pkg);
-                        getPreferences(MODE_PRIVATE).edit()
-                                .putStringSet("hidden", new HashSet<>(userHidden)).apply();
-                    } else if (which == 1) {
-                        List<String> dockList = new ArrayList<>(Arrays.asList(dockApps));
-                        if (inDock) dockList.remove(app.pkg);
-                        else if (!dockList.contains(app.pkg)) dockList.add(app.pkg);
-                        dockApps = dockList.toArray(new String[0]);
-                        getPreferences(MODE_PRIVATE).edit()
-                                .putString("dock", android.text.TextUtils.join(",", dockList)).apply();
-                    } else {
-                        gridOrder.remove(app.pkg);
-                        gridOrder.add(0, app.pkg);
-                        getPreferences(MODE_PRIVATE).edit()
-                                .putString("order", android.text.TextUtils.join(",", gridOrder)).apply();
-                    }
-                    buildApps();
-                }).show();
-    }
-
     /** Explicit D-pad targets: one row per press, ends of rows and of the top bar don't wrap. */
     private void wireFocus() {
         int d = dockCards.size(), g = gridCards.size();
@@ -668,6 +639,66 @@ public class MainActivity extends Activity {
 
     private static final int DIALOG_THEME = android.R.style.Theme_DeviceDefault_Dialog_Alert;
 
+    /** Long-press menu for one app: reorder, app info (force stop), uninstall, hide. */
+    private void showAppMenu(App app, boolean inDock) {
+        String[] opts = {"Move to first", "Move left", "Move right", "Move to last",
+                "App info (Force stop)", "Uninstall", "Hide app", "More options…"};
+        new AlertDialog.Builder(this, DIALOG_THEME).setTitle(app.label)
+                .setItems(opts, (d, which) -> {
+                    if (which <= 3) {
+                        moveApp(app, inDock, which);
+                    } else if (which == 4) {
+                        if (!launch(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                android.net.Uri.parse("package:" + app.pkg)))) notAvailable();
+                    } else if (which == 5) {
+                        if (!launch(new Intent(Intent.ACTION_DELETE,
+                                android.net.Uri.parse("package:" + app.pkg)))) notAvailable();
+                    } else if (which == 6) {
+                        userHidden.add(app.pkg);
+                        getPreferences(MODE_PRIVATE).edit()
+                                .putStringSet("hidden", new HashSet<>(userHidden)).apply();
+                        buildApps();
+                    } else {
+                        showAppManager();
+                    }
+                }).show();
+    }
+
+    private void notAvailable() {
+        android.widget.Toast.makeText(this, "Not available on this TV", android.widget.Toast.LENGTH_SHORT).show();
+    }
+
+    /** mode: 0 = first, 1 = one step left, 2 = one step right, 3 = last. Works in dock and grid. */
+    private void moveApp(App app, boolean inDock, int mode) {
+        List<View> cards = inDock ? dockCards : gridCards;
+        List<String> order = new ArrayList<>();
+        for (View c : cards) order.add(((App) c.getTag()).pkg);
+        int i = order.indexOf(app.pkg);
+        if (i < 0) return;
+        order.remove(i);
+        int j = mode == 0 ? 0 : mode == 1 ? Math.max(0, i - 1)
+                : mode == 2 ? Math.min(order.size(), i + 1) : order.size();
+        order.add(j, app.pkg);
+        String joined = android.text.TextUtils.join(",", order);
+        if (inDock) {
+            dockApps = order.toArray(new String[0]);
+            getPreferences(MODE_PRIVATE).edit().putString("dock", joined).apply();
+        } else {
+            gridOrder = order;
+            getPreferences(MODE_PRIVATE).edit().putString("order", joined).apply();
+        }
+        buildApps();
+        handler.post(() -> focusApp(app.pkg));
+    }
+
+    private void focusApp(String pkg) {
+        for (List<View> cards : Arrays.asList(dockCards, gridCards)) {
+            for (View c : cards) {
+                if (((App) c.getTag()).pkg.equals(pkg)) { c.requestFocus(); return; }
+            }
+        }
+    }
+
     /** Every launchable app (including ones the user hid), sorted by name. */
     private List<App> allApps() {
         PackageManager pm = getPackageManager();
@@ -687,17 +718,12 @@ public class MainActivity extends Activity {
     }
 
     private void showAppManager() {
-        String[] opts = {"Choose dock apps (top row)", "Choose which apps to show",
-                "Next wallpaper", "Change font", "Reset apps"};
+        String[] opts = {"Choose dock apps (top row)", "Choose which apps to show", "Reset apps"};
         new AlertDialog.Builder(this, DIALOG_THEME).setTitle("Customize")
                 .setItems(opts, (d, which) -> {
                     if (which == 0) pickDock();
                     else if (which == 1) pickVisible();
-                    else if (which == 2) nextWallpaper();
-                    else if (which == 3) {
-                        getPreferences(MODE_PRIVATE).edit().putInt("font", (fontIdx + 1) % FONTS.length).apply();
-                        recreate();
-                    } else resetApps();
+                    else resetApps();
                 }).show();
     }
 
